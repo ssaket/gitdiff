@@ -1,0 +1,102 @@
+#!/bin/sh
+# Launcher for the GitDiff desktop app.
+#
+# Works from three places, checked in this order:
+#   1. inside an installed GitDiff.app (this script ships in Contents/Resources/bin)
+#   2. an installed GitDiff.app found in the usual locations
+#   3. a source checkout, using the project's own electron
+#
+# The app is launched detached so it does not tie up your terminal, and always
+# receives an absolute path — its working directory is not yours.
+
+set -e
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+gitdiff — review what your coding agent changed
+
+Usage:
+  gitdiff [path]     Open a repository (defaults to the current directory)
+  gitdiff --help     Show this message
+  gitdiff --version  Show the version
+
+Environment:
+  GITDIFF_APP        Path to GitDiff.app, if it lives somewhere unusual
+EOF
+}
+
+target=""
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    -v|--version) echo "gitdiff $VERSION"; exit 0 ;;
+    -*) printf 'gitdiff: unknown option %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
+    *) target="$arg" ;;
+  esac
+done
+
+[ -n "$target" ] || target="."
+
+# Resolve to an absolute path. A directory is used as-is; a file is opened at
+# its containing directory, since what we want is the repository around it.
+if [ -d "$target" ]; then
+  abs=$(cd "$target" && pwd)
+elif [ -e "$target" ]; then
+  abs=$(cd "$(dirname "$target")" && pwd)
+else
+  echo "gitdiff: no such file or directory: $target" >&2
+  exit 1
+fi
+
+# Follow symlinks to find where this script really lives — it is normally
+# reached through a symlink on PATH.
+self="$0"
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname "$self")/$link" ;;
+  esac
+done
+here=$(cd "$(dirname "$self")" && pwd)
+
+launch() {
+  # nohup + & so the app outlives this shell.
+  nohup "$@" >/dev/null 2>&1 &
+  exit 0
+}
+
+# 1. Shipped inside the app bundle. This script sits at
+#    GitDiff.app/Contents/Resources/bin/gitdiff, so the executable is two
+#    levels up and across, at Contents/MacOS/GitDiff.
+bundled="$here/../../MacOS/GitDiff"
+[ -x "$bundled" ] && launch "$bundled" "$abs"
+
+# 2. An installed app bundle.
+for candidate in "$GITDIFF_APP" "/Applications/GitDiff.app" "$HOME/Applications/GitDiff.app"; do
+  [ -n "$candidate" ] || continue
+  if [ -x "$candidate/Contents/MacOS/GitDiff" ]; then
+    launch "$candidate/Contents/MacOS/GitDiff" "$abs"
+  fi
+done
+
+# 3. A source checkout.
+project=$(cd "$here/.." && pwd)
+electron="$project/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+if [ -x "$electron" ]; then
+  if [ ! -f "$project/out/main/index.js" ]; then
+    echo "gitdiff: no build found — run 'npm run build' in $project" >&2
+    exit 1
+  fi
+  launch "$electron" "$project" "$abs"
+fi
+
+cat >&2 <<'EOF'
+gitdiff: could not find GitDiff.
+
+Install the app to /Applications, or set GITDIFF_APP to its location:
+  GITDIFF_APP=/path/to/GitDiff.app gitdiff .
+EOF
+exit 1

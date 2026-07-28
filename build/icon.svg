@@ -1,0 +1,55 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <title>GitDiff</title>
+  <defs>
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.75" y2="1">
+      <stop offset="0" stop-color="#273348"/>
+      <stop offset="0.5" stop-color="#161d29"/>
+      <stop offset="1" stop-color="#0c1015"/>
+    </linearGradient>
+    <!-- Light catching the top edge, the way macOS icons are lit. -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.13"/>
+      <stop offset="0.42" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.075"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.035"/>
+    </linearGradient>
+    <linearGradient id="added" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3fb950"/>
+      <stop offset="1" stop-color="#2ea043"/>
+    </linearGradient>
+    <linearGradient id="removed" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f85149"/>
+      <stop offset="1" stop-color="#da3633"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS squircle: 824 of 1024, corner radius ~22.4% of the shape. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5"
+        fill="none" stroke="#ffffff" stroke-opacity="0.11" stroke-width="3"/>
+
+  <!-- Two files, side by side. -->
+  <g>
+    <rect x="170" y="339" width="320" height="346" rx="30" fill="url(#panel)"/>
+    <rect x="534" y="339" width="320" height="346" rx="30" fill="url(#panel)"/>
+  </g>
+
+  <!-- Before: one line removed. -->
+  <g fill="#59647a">
+    <rect x="204" y="379" width="188" height="44" rx="22"/>
+    <rect x="204" y="527" width="150" height="44" rx="22"/>
+    <rect x="204" y="601" width="196" height="44" rx="22"/>
+  </g>
+  <rect x="204" y="453" width="252" height="44" rx="22" fill="url(#removed)"/>
+
+  <!-- After: that line rewritten, plus one added. -->
+  <g fill="#59647a">
+    <rect x="568" y="379" width="188" height="44" rx="22"/>
+    <rect x="568" y="601" width="196" height="44" rx="22"/>
+  </g>
+  <rect x="568" y="453" width="252" height="44" rx="22" fill="url(#added)"/>
+  <rect x="568" y="527" width="170" height="44" rx="22" fill="url(#added)"/>
+</svg>

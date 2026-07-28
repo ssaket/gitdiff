@@ -1,0 +1,13 @@
+node_modules/
+
+# electron-vite build output
+out/
+
+# electron-builder output
+release/
+dist/
+
+*.log
+.DS_Store
+.vite/
+*.tsbuildinfo
