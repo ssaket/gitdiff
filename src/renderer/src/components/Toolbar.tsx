@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Baseline, BaselineKind, CommitInfo, RepoInfo } from '@shared/types'
 
+export type Tab = 'review' | 'flows'
+
 interface Props {
-  repo: RepoInfo
+  /** Null when the app was opened straight into a diagram, with no repo. */
+  repo: RepoInfo | null
+  tab: Tab
+  onTabChange: (tab: Tab) => void
+  flowCount: number
   baseline: Baseline
   onBaselineChange: (baseline: Baseline) => void
   onMarkSnapshot: () => void
@@ -27,13 +33,13 @@ const MODES: { kind: BaselineKind; label: string; hint: string }[] = [
 ]
 
 export function Toolbar(props: Props): JSX.Element {
-  const { repo, baseline } = props
+  const { repo, baseline, tab } = props
   const [commitsOpen, setCommitsOpen] = useState(false)
   const [commits, setCommits] = useState<CommitInfo[] | null>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (!commitsOpen) return
+    if (!commitsOpen || !repo) return
     let cancelled = false
     void window.gitdiff.listCommits(repo.root).then((c) => {
       if (!cancelled) setCommits(c)
@@ -46,7 +52,9 @@ export function Toolbar(props: Props): JSX.Element {
       cancelled = true
       document.removeEventListener('mousedown', onDown)
     }
-  }, [commitsOpen, repo.root])
+    // repo?.root, not repo: a refresh hands back a new object each time, and
+    // depending on it would refetch the list under an open popover.
+  }, [commitsOpen, repo?.root])
 
   const selectMode = (kind: BaselineKind): void => {
     if (kind === 'commit') {
@@ -68,14 +76,39 @@ export function Toolbar(props: Props): JSX.Element {
 
       <div className="toolbar-repo">
         <button className="repo-button" onClick={props.onPickRepo} title="Open another repository (⌘O)">
-          <span className="repo-name">{repo.name}</span>
+          <span className="repo-name">{repo ? repo.name : 'Open a repo'}</span>
           <span className="repo-branch">
-            {repo.branch}
-            {repo.head && <span className="repo-sha">{repo.head}</span>}
+            {repo ? repo.branch : 'no repository'}
+            {repo?.head && <span className="repo-sha">{repo.head}</span>}
           </span>
         </button>
       </div>
 
+      <div className="segmented" role="tablist" aria-label="View">
+        <button
+          role="tab"
+          aria-selected={tab === 'review'}
+          className={tab === 'review' ? 'is-active' : ''}
+          title="Review changed files (⌘1)"
+          disabled={!repo}
+          onClick={() => props.onTabChange('review')}
+        >
+          Review
+        </button>
+        <button
+          role="tab"
+          aria-selected={tab === 'flows'}
+          className={tab === 'flows' ? 'is-active' : ''}
+          title="Diagrams your agent sent over (⌘2)"
+          onClick={() => props.onTabChange('flows')}
+        >
+          Flows
+          {props.flowCount > 0 && <span className="tab-count">{props.flowCount}</span>}
+        </button>
+      </div>
+
+      {tab === 'review' && repo && (
+        <>
       <div className="segmented" role="tablist" aria-label="Diff baseline">
         {MODES.map((m) => (
           <button
@@ -126,9 +159,12 @@ export function Toolbar(props: Props): JSX.Element {
         <span className="mark-dot" />
         {baseline.kind === 'snapshot' && baseline.label ? `Re-mark (${baseline.label})` : 'Mark'}
       </button>
+        </>
+      )}
 
       <div className="toolbar-spacer" />
 
+      {tab === 'review' && repo && (
       <div className="toolbar-toggles">
         <Toggle
           active={props.sideBySide}
@@ -162,6 +198,7 @@ export function Toolbar(props: Props): JSX.Element {
           <span className={props.busy ? 'spinning' : undefined}>↻</span>
         </Toggle>
       </div>
+      )}
     </header>
   )
 }

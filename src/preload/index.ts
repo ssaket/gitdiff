@@ -5,6 +5,8 @@ import type {
   CommitInfo,
   FileChange,
   FileDiff,
+  FlowDoc,
+  OpenFlowRequest,
   OpenRepoRequest,
   RepoInfo
 } from '@shared/types'
@@ -32,6 +34,27 @@ const api = {
   revealFile: (root: string, path: string): Promise<void> => ipcRenderer.invoke('file:reveal', { root, path }),
   openFile: (root: string, path: string): Promise<void> =>
     ipcRenderer.invoke('file:openExternal', { root, path }),
+
+  listFlows: (): Promise<FlowDoc[]> => ipcRenderer.invoke('flow:list'),
+  createFlow: (title: string, source: string): Promise<FlowDoc> =>
+    ipcRenderer.invoke('flow:create', { title, source }),
+  updateFlow: (patch: { id: string; title?: string; source?: string }): Promise<FlowDoc> =>
+    ipcRenderer.invoke('flow:update', patch),
+  deleteFlow: (id: string): Promise<void> => ipcRenderer.invoke('flow:delete', id),
+  exportFlow: (name: string, svg: string, png: string | null): Promise<boolean> =>
+    ipcRenderer.invoke('flow:export', { name, svg, png }),
+  copyFlowImage: (pngDataUrl: string): Promise<void> =>
+    ipcRenderer.invoke('flow:copyImage', pngDataUrl),
+
+  /** Diagrams the CLI handed over while the UI was still booting, if any. */
+  consumePendingFlows: (): Promise<OpenFlowRequest | null> => ipcRenderer.invoke('flow:consumePending'),
+
+  /** Fires when `gitdiff flow` hands a diagram to the running app. Returns an unsubscribe. */
+  onFlowRequest: (cb: (request: OpenFlowRequest) => void): (() => void) => {
+    const listener = (_e: unknown, request: OpenFlowRequest): void => cb(request)
+    ipcRenderer.on('flow:openRequest', listener)
+    return () => ipcRenderer.removeListener('flow:openRequest', listener)
+  },
 
   startWatching: (root: string): Promise<void> => ipcRenderer.invoke('watch:start', root),
   stopWatching: (): Promise<void> => ipcRenderer.invoke('watch:stop'),

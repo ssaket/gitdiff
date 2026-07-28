@@ -2,7 +2,8 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { BrowserWindow, app, net, protocol, shell } from 'electron'
 import { disposeIpc, registerIpc, requestOpenRepo } from './ipc'
-import { firstRepoArg } from './cli'
+import { requestOpenFlow } from './flows'
+import { firstRepoArg, flowArg } from './cli'
 
 const isDev = !app.isPackaged
 const rendererDist = path.join(__dirname, '../renderer')
@@ -98,6 +99,9 @@ if (!app.requestSingleInstanceLock()) {
     // The second process's cwd, not ours — that's what `gitdiff .` meant.
     const target = firstRepoArg(argv, { cwd: workingDirectory, appPath: app.getAppPath() })
     if (target) void requestOpenRepo(target, mainWindow)
+
+    const flow = flowArg(argv, { cwd: workingDirectory })
+    if (flow) void requestOpenFlow(flow, mainWindow)
   })
 
   // Finder: "Open With", or a folder dropped on the dock icon.
@@ -113,6 +117,9 @@ if (!app.requestSingleInstanceLock()) {
 
     const target = firstRepoArg(process.argv, { cwd: process.cwd(), appPath: app.getAppPath() })
     if (target) void requestOpenRepo(target, null)
+
+    const flow = flowArg(process.argv, { cwd: process.cwd() })
+    if (flow) void requestOpenFlow(flow, null)
 
     createWindow()
 

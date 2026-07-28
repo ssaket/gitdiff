@@ -41,6 +41,7 @@ Drop a 512×512 `icon.png` into `build/` to change that.
 npm run cli:install     # symlink `gitdiff` onto your PATH
 gitdiff                 # open the current directory
 gitdiff ~/code/project  # open somewhere else
+gitdiff flow diagram.mmd  # show a mermaid diagram — see Flows below
 ```
 
 `cli:install` prefers the shim inside an installed `/Applications/GitDiff.app`,
@@ -98,11 +99,56 @@ Ticking a file records *what it looked like* when you ticked it. If the agent
 edits that file again the tick clears itself, so you get told when something
 you already signed off on has moved.
 
+## Flows
+
+The second tab renders [mermaid](https://mermaid.js.org) diagrams. It exists so
+that when you ask your agent *"explain how this works, visually"*, it has
+somewhere to put the picture:
+
+```bash
+gitdiff flow --title "Request flow" <<'MMD'
+flowchart TD
+  A[Client] --> B[API]
+  B --> C[(Database)]
+MMD
+```
+
+That brings the window forward with the diagram open. It also takes a file —
+`gitdiff flow docs/architecture.md` — and a markdown file's ` ```mermaid `
+blocks each become their own diagram, titled by the heading they sit under.
+No repository is needed; `gitdiff flow` works in any directory.
+
+Diagrams are stored in the app (the 60 most recent), so they survive a restart.
+**Source** opens the mermaid next to the picture and re-renders as you type,
+which makes the tab a usable scratchpad in its own right — while the source is
+unparseable the last good render stays on screen with the error underneath,
+rather than the canvas going blank on every half-finished line.
+
+Scroll to pan, ⌘-scroll (or pinch) to zoom, double-click to fit. **Copy** puts
+a PNG on the clipboard for pasting into a PR or a chat; **Export** writes SVG
+or PNG.
+
+### Teaching your agent about it
+
+Nothing about this is automatic — the agent has to know the command exists.
+Drop this in your `CLAUDE.md` (or `AGENTS.md`, or the equivalent):
+
+```markdown
+When explaining how existing code works, and the explanation is a flow, a
+sequence, or a state machine, render it: write mermaid and pipe it to
+`gitdiff flow --title "<short title>"` via a heredoc. Keep explaining in text
+as well — the diagram is in addition to the answer, not instead of it.
+```
+
+Mermaid is bundled, so rendering is offline and the diagram never leaves your
+machine. Diagrams arrive from a language model, so they're parsed with
+mermaid's `strict` security level and rendered without embedded HTML.
+
 ## Keyboard
 
 | Key | |
 |---|---|
-| `j` / `k` | next / previous file |
+| `j` / `k` | next / previous file (or diagram) |
 | `n` / `p` (or `]` / `[`) | next / previous hunk |
 | `space` | mark reviewed, advance |
 | `/` or `⌘F` | filter files |
@@ -110,6 +156,8 @@ you already signed off on has moved.
 | `⌘M` | mark snapshot |
 | `⌘R` | refresh now |
 | `⌘O` | open another repo |
+| `⌘1` / `⌘2` | Review ⇄ Flows |
+| `⌘E` | show the mermaid source |
 
 ## Notes
 
@@ -128,8 +176,11 @@ you already signed off on has moved.
 ## Layout
 
 ```
-src/main/       git.ts · snapshot.ts · diff.ts · watcher.ts · ipc.ts · store.ts
+src/main/       git.ts · snapshot.ts · diff.ts · watcher.ts · flows.ts · ipc.ts · store.ts
 src/preload/    the contextBridge API surface
-src/renderer/   React UI + Monaco
+src/renderer/   React UI + Monaco + mermaid
 src/shared/     types shared across all three
 ```
+
+Mermaid is dynamically imported, so the ~1 MB of parser and layout engine is
+only fetched once you open a diagram — reviewing a diff never loads it.

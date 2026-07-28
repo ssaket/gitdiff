@@ -1,9 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Baseline, ChangeSet, FileChange, FileDiff, RepoInfo } from '@shared/types'
+import type {
+  Baseline,
+  ChangeSet,
+  FileChange,
+  FileDiff,
+  FlowDoc,
+  OpenFlowRequest,
+  RepoInfo
+} from '@shared/types'
 import { DiffView, type DiffViewHandle } from './components/DiffView'
 import { FileList } from './components/FileList'
-import { Toolbar } from './components/Toolbar'
+import { FlowsPane } from './components/FlowsPane'
+import { Toolbar, type Tab } from './components/Toolbar'
 import { Welcome } from './components/Welcome'
+
+/** What a hand-written diagram starts as, so the canvas is never blank. */
+const NEW_FLOW = `flowchart TD
+  A[Start] --> B{Works?}
+  B -- yes --> C[Ship it]
+  B -- no --> D[Fix it]
+  D --> B
+`
 
 /**
  * Reviewed marks are pinned to *what the file looked like* when you ticked it.
@@ -45,10 +62,18 @@ export function App(): JSX.Element {
   const [collapseUnchanged, setCollapseUnchanged] = useState(true)
   const [ignoreWhitespace, setIgnoreWhitespace] = useState(false)
 
+  const [tab, setTab] = useState<Tab>('review')
+  const [flows, setFlows] = useState<FlowDoc[]>([])
+  const [selectedFlow, setSelectedFlow] = useState<string | null>(null)
+  const [showFlowSource, setShowFlowSource] = useState(false)
+
   const diffViewRef = useRef<DiffViewHandle>(null)
   const filterRef = useRef<HTMLInputElement>(null)
   const scanTokenRef = useRef(0)
   const diffTokenRef = useRef(0)
+  const flowsRef = useRef(flows)
+  flowsRef.current = flows
+  const flowSaveTimers = useRef(new Map<string, number>())
 
   const reviewed = useMemo(() => {
     const set = new Set<string>()
@@ -175,6 +200,103 @@ export function App(): JSX.Element {
     return window.gitdiff.onOpenRepoRequest(handle)
   }, [applyRepo])
 
+  // ------------------------------------------------------------------ flows
+
+  useEffect(() => {
+    void window.gitdiff.listFlows().then((list) => {
+      setFlows(list)
+      setSelectedFlow((current) => current ?? list[0]?.id ?? null)
+    })
+  }, [])
+
+  // `gitdiff flow` from the agent's shell. Same shape as the repo request: it
+  // may have arrived before this component existed, so collect the parked one
+  // as well as subscribing for later ones.
+  useEffect(() => {
+    const handle = (request: OpenFlowRequest): void => {
+      if (request.error) {
+        setError(request.error)
+        return
+      }
+      if (request.flows.length === 0) return
+      const incoming = new Set(request.flows.map((f) => f.id))
+      setFlows((prev) => [...request.flows, ...prev.filter((f) => !incoming.has(f.id))])
+      setSelectedFlow(request.flows[0].id)
+      setTab('flows')
+    }
+    void window.gitdiff.consumePendingFlows().then((pending) => {
+      if (pending) handle(pending)
+    })
+    return window.gitdiff.onFlowRequest(handle)
+  }, [])
+
+  /**
+   * Edits land in state immediately and are written back on a delay — typing in
+   * the source pane would otherwise rewrite the whole store on every keystroke.
+   * The timer saves whatever the flow looks like when it fires rather than the
+   * patch that scheduled it, so a title edit is never lost behind a later one
+   * to the source.
+   */
+  const changeFlow = useCallback((id: string, patch: { title?: string; source?: string }) => {
+    setFlows((prev) =>
+      prev.map((f) => (f.id === id ? { ...f, ...patch, updatedAt: Date.now() } : f))
+    )
+
+    const timers = flowSaveTimers.current
+    window.clearTimeout(timers.get(id))
+    timers.set(
+      id,
+      window.setTimeout(() => {
+        timers.delete(id)
+        const current = flowsRef.current.find((f) => f.id === id)
+        if (!current) return
+        void window.gitdiff
+          .updateFlow({ id, title: current.title, source: current.source })
+          .catch((e) => setError(errorText(e)))
+      }, 400)
+    )
+  }, [])
+
+  const newFlow = useCallback(async () => {
+    try {
+      const flow = await window.gitdiff.createFlow('Untitled flow', NEW_FLOW)
+      setFlows((prev) => [flow, ...prev])
+      setSelectedFlow(flow.id)
+      setShowFlowSource(true)
+      setTab('flows')
+    } catch (e) {
+      setError(errorText(e))
+    }
+  }, [])
+
+  const deleteFlow = useCallback(
+    async (id: string) => {
+      try {
+        await window.gitdiff.deleteFlow(id)
+        const remaining = flows.filter((f) => f.id !== id)
+        setFlows(remaining)
+        if (selectedFlow === id) {
+          // Land on the neighbour rather than the top of the list.
+          const at = flows.findIndex((f) => f.id === id)
+          setSelectedFlow(remaining[Math.min(at, remaining.length - 1)]?.id ?? null)
+        }
+      } catch (e) {
+        setError(errorText(e))
+      }
+    },
+    [flows, selectedFlow]
+  )
+
+  const stepFlow = useCallback(
+    (delta: number) => {
+      if (flows.length === 0) return
+      const index = flows.findIndex((f) => f.id === selectedFlow)
+      const next = flows[Math.min(flows.length - 1, Math.max(0, index + delta))]
+      if (next) setSelectedFlow(next.id)
+    },
+    [flows, selectedFlow]
+  )
+
   const markSnapshot = useCallback(async () => {
     if (!repo) return
     try {
@@ -238,6 +360,10 @@ export function App(): JSX.Element {
 
   // -------------------------------------------------------------- shortcuts
 
+  // With no repo open there is nothing to review, so the diagrams are all there
+  // is to show — `gitdiff flow` in a directory that isn't a repo still works.
+  const activeTab: Tab = repo ? tab : 'flows'
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement | null
@@ -250,6 +376,34 @@ export function App(): JSX.Element {
         void pickRepo()
         return
       }
+      if (e.key === 'Escape' && typing) {
+        ;(target as HTMLInputElement).blur()
+        return
+      }
+      if (mod && (e.key === '1' || e.key === '2')) {
+        e.preventDefault()
+        if (e.key === '2') setTab('flows')
+        else if (repo) setTab('review')
+        return
+      }
+
+      if (activeTab === 'flows') {
+        if (mod && e.key.toLowerCase() === 'e') {
+          e.preventDefault()
+          setShowFlowSource((v) => !v)
+          return
+        }
+        if (typing || mod) return
+        if (e.key === 'j' || e.key === 'ArrowDown') {
+          e.preventDefault()
+          stepFlow(1)
+        } else if (e.key === 'k' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          stepFlow(-1)
+        }
+        return
+      }
+
       if (!repo) return
 
       if (mod && e.key.toLowerCase() === 'r') {
@@ -271,10 +425,6 @@ export function App(): JSX.Element {
         e.preventDefault()
         filterRef.current?.focus()
         filterRef.current?.select()
-        return
-      }
-      if (e.key === 'Escape' && typing) {
-        ;(target as HTMLInputElement).blur()
         return
       }
       if (typing || mod) return
@@ -315,11 +465,22 @@ export function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [repo, baseline, selected, step, toggleReviewed, refresh, markSnapshot, pickRepo])
+  }, [
+    repo,
+    baseline,
+    selected,
+    step,
+    toggleReviewed,
+    refresh,
+    markSnapshot,
+    pickRepo,
+    activeTab,
+    stepFlow
+  ])
 
   // ------------------------------------------------------------------ render
 
-  if (!repo) {
+  if (!repo && flows.length === 0) {
     return <Welcome onPick={pickRepo} onOpen={openRepo} error={error} />
   }
 
@@ -340,11 +501,14 @@ export function App(): JSX.Element {
     >
       <Toolbar
         repo={repo}
+        tab={activeTab}
+        onTabChange={setTab}
+        flowCount={flows.length}
         baseline={baseline}
         onBaselineChange={changeBaseline}
         onMarkSnapshot={markSnapshot}
         onPickRepo={pickRepo}
-        onRefresh={() => void refresh(repo.root, baseline)}
+        onRefresh={() => repo && void refresh(repo.root, baseline)}
         autoRefresh={autoRefresh}
         onAutoRefreshChange={setAutoRefresh}
         sideBySide={sideBySide}
@@ -363,13 +527,27 @@ export function App(): JSX.Element {
         </div>
       )}
 
-      {stale && (
+      {stale && repo && activeTab === 'review' && (
         <div className="banner banner-stale">
           <span>Files changed on disk.</span>
           <button onClick={() => void refresh(repo.root, baseline)}>Reload</button>
         </div>
       )}
 
+      {activeTab === 'flows' ? (
+        <FlowsPane
+          flows={flows}
+          selectedId={selectedFlow}
+          onSelect={setSelectedFlow}
+          onNew={() => void newFlow()}
+          onDelete={(id) => void deleteFlow(id)}
+          onChange={changeFlow}
+          onError={setError}
+          showSource={showFlowSource}
+          onShowSourceChange={setShowFlowSource}
+          dark={dark}
+        />
+      ) : (
       <main className="workspace">
         <FileList
           files={files}
@@ -431,16 +609,34 @@ export function App(): JSX.Element {
           />
         </section>
       </main>
+      )}
 
       <footer className="statusbar">
-        <span>
-          {files.length} file{files.length === 1 ? '' : 's'}
-        </span>
-        {totals.add > 0 && <span className="count-add">+{totals.add}</span>}
-        {totals.del > 0 && <span className="count-del">−{totals.del}</span>}
-        <span className="statusbar-spacer" />
-        <span className="statusbar-hint">j/k files · n/p hunks · space reviewed · / filter</span>
-        <span className={`watch-dot${autoRefresh ? ' is-live' : ''}`} title={autoRefresh ? 'Watching' : 'Paused'} />
+        {activeTab === 'flows' ? (
+          <>
+            <span>
+              {flows.length} diagram{flows.length === 1 ? '' : 's'}
+            </span>
+            <span className="statusbar-spacer" />
+            <span className="statusbar-hint">
+              j/k diagrams · ⌘E source · scroll to pan · ⌘-scroll to zoom · double-click to fit
+            </span>
+          </>
+        ) : (
+          <>
+            <span>
+              {files.length} file{files.length === 1 ? '' : 's'}
+            </span>
+            {totals.add > 0 && <span className="count-add">+{totals.add}</span>}
+            {totals.del > 0 && <span className="count-del">−{totals.del}</span>}
+            <span className="statusbar-spacer" />
+            <span className="statusbar-hint">j/k files · n/p hunks · space reviewed · / filter</span>
+            <span
+              className={`watch-dot${autoRefresh ? ' is-live' : ''}`}
+              title={autoRefresh ? 'Watching' : 'Paused'}
+            />
+          </>
+        )}
       </footer>
     </div>
   )

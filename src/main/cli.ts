@@ -1,4 +1,9 @@
 import path from 'node:path'
+import type { FlowSpec } from './flows'
+
+const FLOW_FILE = '--gitdiff-flow='
+const FLOW_TITLE = '--gitdiff-flow-title='
+const FLOW_TEMP = '--gitdiff-flow-temp'
 
 /**
  * Pulls the repository path out of a process argv.
@@ -26,4 +31,28 @@ export function firstRepoArg(
     return resolved
   }
   return null
+}
+
+/**
+ * Pulls a `gitdiff flow` request out of a process argv.
+ *
+ * The diagram travels as a file rather than on the command line: it may be
+ * hundreds of lines, and by the time an already-running app is handed these
+ * arguments the shell that read them from stdin is long gone. Switch form
+ * (`--gitdiff-flow=…`) rather than positional, so `firstRepoArg` above keeps
+ * skipping it — a flow request must not also retarget the diff view.
+ */
+export function flowArg(argv: string[], opts: { cwd: string }): FlowSpec | null {
+  let file: string | null = null
+  let title: string | null = null
+  let ephemeral = false
+
+  for (const arg of argv.slice(1)) {
+    if (arg.startsWith(FLOW_FILE)) file = arg.slice(FLOW_FILE.length)
+    else if (arg.startsWith(FLOW_TITLE)) title = arg.slice(FLOW_TITLE.length)
+    else if (arg === FLOW_TEMP) ephemeral = true
+  }
+
+  if (!file) return null
+  return { path: path.resolve(opts.cwd, file), title, ephemeral }
 }

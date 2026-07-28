@@ -1,7 +1,16 @@
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
-import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import type { Baseline, ChangeSet, FileChange, FileDiff, OpenRepoRequest, RepoInfo } from '@shared/types'
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
+import type {
+  Baseline,
+  ChangeSet,
+  FileChange,
+  FileDiff,
+  FlowDoc,
+  OpenFlowRequest,
+  OpenRepoRequest,
+  RepoInfo
+} from '@shared/types'
 import {
   checkoutFile,
   diffRevArgs,
@@ -15,7 +24,8 @@ import {
 import { currentTree, disposeRepoIndexes, markSnapshot } from './snapshot'
 import { loadFileDiff } from './diff'
 import { RepoWatcher } from './watcher'
-import { forgetRepo, listRecentRepos, rememberRepo } from './store'
+import { consumePendingFlows, createFlow, updateFlow } from './flows'
+import { forgetRepo, listFlows, listRecentRepos, rememberRepo, removeFlow } from './store'
 
 /**
  * The renderer names repos by absolute path, so the main process only honours
@@ -193,6 +203,54 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     assertAuthorized(root)
     const full = safeJoin(root, p)
     if (await fs.stat(full).catch(() => null)) await shell.openPath(full)
+  })
+
+  // ------------------------------------------------------------------ flows
+
+  handle<void, FlowDoc[]>('flow:list', () => listFlows())
+
+  handle<{ title: string; source: string }, FlowDoc>('flow:create', ({ title, source }) =>
+    createFlow({ title, source })
+  )
+
+  handle<{ id: string; title?: string; source?: string }, FlowDoc>('flow:update', (patch) =>
+    updateFlow(patch)
+  )
+
+  handle<string, void>('flow:delete', (id) => removeFlow(id))
+
+  handle<void, OpenFlowRequest | null>('flow:consumePending', async () => consumePendingFlows())
+
+  handle<{ name: string; svg: string; png: string | null }, boolean>(
+    'flow:export',
+    async ({ name, svg, png }) => {
+      const win = getWindow()
+      const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+        title: 'Export diagram',
+        defaultPath: `${name.replace(/[/\\:*?"<>|]+/g, '-').trim() || 'diagram'}.svg`,
+        filters: [
+          { name: 'SVG', extensions: ['svg'] },
+          { name: 'PNG', extensions: ['png'] }
+        ]
+      })
+      if (canceled || !filePath) return false
+
+      // The dialog's file type follows whatever extension the user typed or
+      // picked, so the extension is the only thing that decides the format.
+      if (filePath.toLowerCase().endsWith('.png')) {
+        if (!png) throw new Error('Could not rasterize this diagram — export it as SVG.')
+        await fs.writeFile(filePath, Buffer.from(png.replace(/^data:.*?;base64,/, ''), 'base64'))
+      } else {
+        await fs.writeFile(filePath, svg, 'utf8')
+      }
+      return true
+    }
+  )
+
+  handle<string, void>('flow:copyImage', async (dataUrl) => {
+    const image = nativeImage.createFromDataURL(dataUrl)
+    if (image.isEmpty()) throw new Error('Could not rasterize this diagram.')
+    clipboard.writeImage(image)
   })
 
   handle<string, void>('watch:start', async (root) => {

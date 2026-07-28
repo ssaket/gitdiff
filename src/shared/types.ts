@@ -65,6 +65,28 @@ export interface OpenRepoRequest {
   error: string | null
 }
 
+/**
+ * A mermaid diagram held by the app. Usually written by a coding agent through
+ * `gitdiff flow`, but also editable in place — the source is the document, and
+ * the rendered picture is derived from it.
+ */
+export interface FlowDoc {
+  id: string
+  title: string
+  /** Mermaid source text. */
+  source: string
+  /** Where it came from — a file path, or null when typed into the app. */
+  origin: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+/** Diagrams handed to the app from outside the UI — i.e. the CLI. */
+export interface OpenFlowRequest {
+  flows: FlowDoc[]
+  error: string | null
+}
+
 export interface ChangeSet {
   files: FileChange[]
   repo: RepoInfo

@@ -19,6 +19,7 @@ gitdiff — review what your coding agent changed
 
 Usage:
   gitdiff [path]     Open a repository (defaults to the current directory)
+  gitdiff flow [...] Render a mermaid diagram (see `gitdiff flow --help`)
   gitdiff --help     Show this message
   gitdiff --version  Show the version
 
@@ -27,27 +28,94 @@ Environment:
 EOF
 }
 
+flow_usage() {
+  cat <<'EOF'
+gitdiff flow — show a mermaid diagram in the Flows tab
+
+Usage:
+  gitdiff flow [file]          Render a .mmd file, or a .md file's ```mermaid blocks
+  gitdiff flow                 Read the diagram from stdin
+  gitdiff flow -t "Title" ...  Name it
+
+Meant to be called by a coding agent when you ask it to explain something
+visually — it writes the diagram, pipes it here, and the window comes forward:
+
+  gitdiff flow --title "Request flow" <<'MMD'
+  flowchart TD
+    A[Client] --> B[API]
+    B --> C[(Database)]
+  MMD
+EOF
+}
+
+mode="repo"
 target=""
-for arg in "$@"; do
-  case "$arg" in
-    -h|--help) usage; exit 0 ;;
-    -v|--version) echo "gitdiff $VERSION"; exit 0 ;;
-    -*) printf 'gitdiff: unknown option %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
-    *) target="$arg" ;;
-  esac
-done
+flow_title=""
+flow_src=""
 
-[ -n "$target" ] || target="."
-
-# Resolve to an absolute path. A directory is used as-is; a file is opened at
-# its containing directory, since what we want is the repository around it.
-if [ -d "$target" ]; then
-  abs=$(cd "$target" && pwd)
-elif [ -e "$target" ]; then
-  abs=$(cd "$(dirname "$target")" && pwd)
+if [ "$1" = "flow" ]; then
+  mode="flow"
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help) flow_usage; exit 0 ;;
+      -t|--title)
+        [ $# -ge 2 ] || { echo "gitdiff flow: --title needs a value" >&2; exit 2; }
+        flow_title="$2"; shift 2 ;;
+      --title=*) flow_title="${1#--title=}"; shift ;;
+      -) flow_src=""; shift ;;
+      -*) printf 'gitdiff flow: unknown option %s\n\n' "$1" >&2; flow_usage >&2; exit 2 ;;
+      *) flow_src="$1"; shift ;;
+    esac
+  done
 else
-  echo "gitdiff: no such file or directory: $target" >&2
-  exit 1
+  for arg in "$@"; do
+    case "$arg" in
+      -h|--help) usage; exit 0 ;;
+      -v|--version) echo "gitdiff $VERSION"; exit 0 ;;
+      -*) printf 'gitdiff: unknown option %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
+      *) target="$arg" ;;
+    esac
+  done
+fi
+
+if [ "$mode" = "flow" ]; then
+  if [ -n "$flow_src" ]; then
+    [ -f "$flow_src" ] || { echo "gitdiff flow: no such file: $flow_src" >&2; exit 1; }
+    # A real file is handed over as itself, so the app can show where the
+    # diagram came from; only stdin needs a temporary.
+    flow_file=$(cd "$(dirname "$flow_src")" && pwd)/$(basename "$flow_src")
+    flow_temp=""
+  else
+    if [ -t 0 ]; then
+      echo "gitdiff flow: no diagram given — pass a file or pipe one in" >&2
+      echo "try: gitdiff flow --help" >&2
+      exit 2
+    fi
+    flow_file=$(mktemp "${TMPDIR:-/tmp}/gitdiff-flow.XXXXXX")
+    # The app is launched detached and reads this after we exit, so it is
+    # written in full first and the app deletes it once it has been read.
+    cat >"$flow_file"
+    if [ ! -s "$flow_file" ]; then
+      rm -f "$flow_file"
+      echo "gitdiff flow: the diagram was empty" >&2
+      exit 2
+    fi
+    flow_temp="--gitdiff-flow-temp"
+  fi
+else
+  [ -n "$target" ] || target="."
+
+  # Resolve to an absolute path. A directory is used as-is; a file is opened at
+  # its containing directory, since what we want is the repository around it.
+  if [ -d "$target" ]; then
+    abs=$(cd "$target" && pwd)
+  elif [ -e "$target" ]; then
+    abs=$(cd "$(dirname "$target")" && pwd)
+  else
+    echo "gitdiff: no such file or directory: $target" >&2
+    exit 1
+  fi
 fi
 
 # Follow symlinks to find where this script really lives — it is normally
@@ -62,6 +130,17 @@ while [ -L "$self" ]; do
 done
 here=$(cd "$(dirname "$self")" && pwd)
 
+# The arguments the app itself gets, built once so every launch path below
+# hands over the same thing. Positional parameters because this is POSIX sh and
+# a plain string would come apart on the first space in a title or a path.
+if [ "$mode" = "flow" ]; then
+  set -- "--gitdiff-flow=$flow_file"
+  if [ -n "$flow_temp" ]; then set -- "$@" "$flow_temp"; fi
+  if [ -n "$flow_title" ]; then set -- "$@" "--gitdiff-flow-title=$flow_title"; fi
+else
+  set -- "$abs"
+fi
+
 launch() {
   # nohup + & so the app outlives this shell.
   nohup "$@" >/dev/null 2>&1 &
@@ -72,13 +151,13 @@ launch() {
 #    GitDiff.app/Contents/Resources/bin/gitdiff, so the executable is two
 #    levels up and across, at Contents/MacOS/GitDiff.
 bundled="$here/../../MacOS/GitDiff"
-[ -x "$bundled" ] && launch "$bundled" "$abs"
+[ -x "$bundled" ] && launch "$bundled" "$@"
 
 # 2. An installed app bundle.
 for candidate in "$GITDIFF_APP" "/Applications/GitDiff.app" "$HOME/Applications/GitDiff.app"; do
   [ -n "$candidate" ] || continue
   if [ -x "$candidate/Contents/MacOS/GitDiff" ]; then
-    launch "$candidate/Contents/MacOS/GitDiff" "$abs"
+    launch "$candidate/Contents/MacOS/GitDiff" "$@"
   fi
 done
 
@@ -90,7 +169,7 @@ if [ -x "$electron" ]; then
     echo "gitdiff: no build found — run 'npm run build' in $project" >&2
     exit 1
   fi
-  launch "$electron" "$project" "$abs"
+  launch "$electron" "$project" "$@"
 fi
 
 cat >&2 <<'EOF'
