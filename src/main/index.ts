@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BrowserWindow, app, net, protocol, shell } from 'electron'
+import { BrowserWindow, app, nativeImage, net, protocol, shell } from 'electron'
 import { disposeIpc, registerIpc, requestOpenRepo } from './ipc'
 import { requestOpenFlow } from './flows'
 import { firstRepoArg, flowArg } from './cli'
@@ -79,6 +79,19 @@ function createWindow(): void {
   }
 }
 
+/**
+ * A dev run is Electron's own bundle with our code inside it, so macOS takes
+ * the dock icon and the app name from *that* bundle — `build/icon.png` is only
+ * ever read by electron-builder, at package time. Setting both at runtime makes
+ * a dev window look like the real thing; a packaged build already does.
+ */
+function brandDevApp(): void {
+  if (!isDev || process.platform !== 'darwin') return
+  // out/main/index.js → the project root, where build/ lives.
+  const icon = nativeImage.createFromPath(path.join(__dirname, '../../build/icon.png'))
+  if (!icon.isEmpty()) app.dock?.setIcon(icon)
+}
+
 function focusWindow(): void {
   if (!mainWindow) return
   if (mainWindow.isMinimized()) mainWindow.restore()
@@ -112,6 +125,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.whenReady().then(() => {
+    brandDevApp()
     registerAppProtocol()
     registerIpc(() => mainWindow)
 
