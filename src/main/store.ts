@@ -6,6 +6,12 @@ import type { FlowDoc } from '@shared/types'
 interface State {
   recentRepos: string[]
   flows: FlowDoc[]
+  /**
+   * Per repo root: the paths left out the last time a PR was published from it.
+   * They're still on disk afterwards and still show in the review, so without
+   * this the next Update PR would quietly sweep them back in.
+   */
+  prExcludes: Record<string, string[]>
 }
 
 const MAX_RECENT = 12
@@ -29,6 +35,15 @@ function sanitizeFlows(value: unknown): FlowDoc[] {
   )
 }
 
+function sanitizeExcludes(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const result: Record<string, string[]> = {}
+  for (const [root, paths] of Object.entries(value)) {
+    if (Array.isArray(paths)) result[root] = paths.filter((p): p is string => typeof p === 'string')
+  }
+  return result
+}
+
 export async function loadState(): Promise<State> {
   if (cached) return cached
   try {
@@ -36,10 +51,11 @@ export async function loadState(): Promise<State> {
     const parsed = JSON.parse(raw) as Partial<State>
     cached = {
       recentRepos: Array.isArray(parsed.recentRepos) ? parsed.recentRepos : [],
-      flows: sanitizeFlows(parsed.flows)
+      flows: sanitizeFlows(parsed.flows),
+      prExcludes: sanitizeExcludes(parsed.prExcludes)
     }
   } catch {
-    cached = { recentRepos: [], flows: [] }
+    cached = { recentRepos: [], flows: [], prExcludes: {} }
   }
   return cached
 }
@@ -84,6 +100,17 @@ export async function putFlow(flow: FlowDoc): Promise<FlowDoc> {
 export async function removeFlow(id: string): Promise<void> {
   const state = await loadState()
   state.flows = state.flows.filter((f) => f.id !== id)
+  await save()
+}
+
+export async function getPrExcludes(root: string): Promise<string[]> {
+  return (await loadState()).prExcludes[root] ?? []
+}
+
+export async function setPrExcludes(root: string, paths: string[]): Promise<void> {
+  const state = await loadState()
+  if (paths.length) state.prExcludes[root] = [...new Set(paths)]
+  else delete state.prExcludes[root]
   await save()
 }
 

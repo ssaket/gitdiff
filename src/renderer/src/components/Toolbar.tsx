@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import type { Baseline, BaselineKind, CommitInfo, RepoInfo } from '@shared/types'
+import type { Baseline, BranchInfo, PrLookup, RepoInfo } from '@shared/types'
+import type { ReviewComment, ReviewRound } from '@shared/review'
+import { FeedbackMenu } from './FeedbackMenu'
+import { BasePicker, ScopeMenu } from './ScopeMenu'
 
 export type Tab = 'review' | 'flows'
 
@@ -11,7 +13,23 @@ interface Props {
   flowCount: number
   baseline: Baseline
   onBaselineChange: (baseline: Baseline) => void
-  onMarkSnapshot: () => void
+  branch: BranchInfo | null
+  base: string | null
+  onBaseChange: (base: string) => void
+  rounds: ReviewRound[]
+  onStartRound: () => void
+  /** Open review comments, and what to do with them. */
+  comments: ReviewComment[]
+  resolvedCount: number
+  scanToken: number
+  onJumpToComment: (path: string, line: number) => void
+  onResolveComment: (id: string) => void
+  onCopyComments: () => void
+  onSendComments: () => void
+  onClearResolved: () => void
+  commitCumulative: boolean
+  pr: PrLookup | null
+  onOpenPrSheet: () => void
   onPickRepo: () => void
   onRefresh: () => void
   autoRefresh: boolean
@@ -25,50 +43,9 @@ interface Props {
   busy: boolean
 }
 
-const MODES: { kind: BaselineKind; label: string; hint: string }[] = [
-  { kind: 'worktree', label: 'Uncommitted', hint: 'Everything not yet committed, vs HEAD' },
-  { kind: 'staged', label: 'Staged', hint: 'Index vs HEAD' },
-  { kind: 'snapshot', label: 'Since mark', hint: 'Everything that changed since you marked' },
-  { kind: 'commit', label: 'Commit', hint: 'A single commit vs its parent' }
-]
-
 export function Toolbar(props: Props): JSX.Element {
-  const { repo, baseline, tab } = props
-  const [commitsOpen, setCommitsOpen] = useState(false)
-  const [commits, setCommits] = useState<CommitInfo[] | null>(null)
-  const popoverRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!commitsOpen || !repo) return
-    let cancelled = false
-    void window.gitdiff.listCommits(repo.root).then((c) => {
-      if (!cancelled) setCommits(c)
-    })
-    const onDown = (e: MouseEvent): void => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) setCommitsOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => {
-      cancelled = true
-      document.removeEventListener('mousedown', onDown)
-    }
-    // repo?.root, not repo: a refresh hands back a new object each time, and
-    // depending on it would refetch the list under an open popover.
-  }, [commitsOpen, repo?.root])
-
-  const selectMode = (kind: BaselineKind): void => {
-    if (kind === 'commit') {
-      setCommitsOpen(true)
-      return
-    }
-    if (kind === 'snapshot' && !baseline.ref) {
-      props.onMarkSnapshot()
-      return
-    }
-    props.onBaselineChange(
-      kind === 'snapshot' ? { kind, ref: baseline.ref, label: baseline.label } : { kind }
-    )
-  }
+  const { repo, tab } = props
+  const openPr = props.pr?.pr ?? null
 
   return (
     <header className="toolbar">
@@ -109,95 +86,96 @@ export function Toolbar(props: Props): JSX.Element {
 
       {tab === 'review' && repo && (
         <>
-      <div className="segmented" role="tablist" aria-label="Diff baseline">
-        {MODES.map((m) => (
-          <button
-            key={m.kind}
-            role="tab"
-            aria-selected={baseline.kind === m.kind}
-            className={baseline.kind === m.kind ? 'is-active' : ''}
-            title={m.hint}
-            onClick={() => selectMode(m.kind)}
-          >
-            {m.kind === 'commit' && baseline.kind === 'commit' && baseline.label
-              ? baseline.label
-              : m.label}
-          </button>
-        ))}
-        {commitsOpen && (
-          <div className="popover" ref={popoverRef}>
-            <div className="popover-title">Pick a commit</div>
-            <ul>
-              {commits === null && <li className="popover-loading">Loading…</li>}
-              {commits?.length === 0 && <li className="popover-loading">No commits yet.</li>}
-              {commits?.map((c) => (
-                <li key={c.sha}>
-                  <button
-                    onClick={() => {
-                      props.onBaselineChange({ kind: 'commit', ref: c.sha, label: c.shortSha })
-                      setCommitsOpen(false)
-                    }}
-                  >
-                    <code>{c.shortSha}</code>
-                    <span className="commit-subject">{c.subject}</span>
-                    <span className="commit-meta">
-                      {c.author} · {c.relativeDate}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-
-      <button
-        className="mark-button"
-        onClick={props.onMarkSnapshot}
-        title="Snapshot the worktree now, then review everything the agent changes from here (⌘M)"
-      >
-        <span className="mark-dot" />
-        {baseline.kind === 'snapshot' && baseline.label ? `Re-mark (${baseline.label})` : 'Mark'}
-      </button>
+          <BasePicker branch={props.branch} base={props.base} onChange={props.onBaseChange} />
+          <ScopeMenu
+            repoRoot={repo.root}
+            baseline={props.baseline}
+            branch={props.branch}
+            base={props.base}
+            rounds={props.rounds}
+            commitCumulative={props.commitCumulative}
+            onSelect={props.onBaselineChange}
+            onStartRound={props.onStartRound}
+          />
         </>
       )}
 
       <div className="toolbar-spacer" />
 
       {tab === 'review' && repo && (
-      <div className="toolbar-toggles">
-        <Toggle
-          active={props.sideBySide}
-          onClick={() => props.onSideBySideChange(!props.sideBySide)}
-          title="Side-by-side / inline (⌘\)"
-        >
-          {props.sideBySide ? '◫' : '▤'}
-        </Toggle>
-        <Toggle
-          active={props.collapseUnchanged}
-          onClick={() => props.onCollapseChange(!props.collapseUnchanged)}
-          title="Collapse unchanged regions"
-        >
-          ⇕
-        </Toggle>
-        <Toggle
-          active={props.ignoreWhitespace}
-          onClick={() => props.onIgnoreWhitespaceChange(!props.ignoreWhitespace)}
-          title="Ignore whitespace-only changes"
-        >
-          ␣
-        </Toggle>
-        <Toggle
-          active={props.autoRefresh}
-          onClick={() => props.onAutoRefreshChange(!props.autoRefresh)}
-          title="Auto-refresh when files change on disk"
-        >
-          ◉
-        </Toggle>
-        <Toggle active={false} onClick={props.onRefresh} title="Refresh now (⌘R)">
-          <span className={props.busy ? 'spinning' : undefined}>↻</span>
-        </Toggle>
-      </div>
+        <>
+          <div className="toolbar-toggles">
+            <Toggle
+              active={props.sideBySide}
+              onClick={() => props.onSideBySideChange(!props.sideBySide)}
+              title="Side-by-side / inline (⌘\)"
+            >
+              {props.sideBySide ? '◫' : '▤'}
+            </Toggle>
+            <Toggle
+              active={props.collapseUnchanged}
+              onClick={() => props.onCollapseChange(!props.collapseUnchanged)}
+              title="Collapse unchanged regions"
+            >
+              ⇕
+            </Toggle>
+            <Toggle
+              active={props.ignoreWhitespace}
+              onClick={() => props.onIgnoreWhitespaceChange(!props.ignoreWhitespace)}
+              title="Ignore whitespace-only changes"
+            >
+              ␣
+            </Toggle>
+            <Toggle
+              active={props.autoRefresh}
+              onClick={() => props.onAutoRefreshChange(!props.autoRefresh)}
+              title="Auto-refresh when files change on disk"
+            >
+              ◉
+            </Toggle>
+            <Toggle active={false} onClick={props.onRefresh} title="Refresh now (⌘R)">
+              <span className={props.busy ? 'spinning' : undefined}>↻</span>
+            </Toggle>
+          </div>
+
+          <FeedbackMenu
+            repoRoot={repo.root}
+            comments={props.comments}
+            resolvedCount={props.resolvedCount}
+            scanToken={props.scanToken}
+            onJump={props.onJumpToComment}
+            onResolve={props.onResolveComment}
+            onCopy={props.onCopyComments}
+            onSend={props.onSendComments}
+            onClearResolved={props.onClearResolved}
+          />
+
+          <div className="pr-actions">
+            {openPr && (
+              <button
+                className="pr-link"
+                onClick={() => window.open(openPr.url)}
+                title={`Open PR #${openPr.number} on GitHub — ${openPr.title}`}
+              >
+                #{openPr.number} ↗
+              </button>
+            )}
+            <button
+              className="pr-button"
+              disabled={!props.base}
+              onClick={props.onOpenPrSheet}
+              title={
+                !props.base
+                  ? 'There is no base branch to open a PR against'
+                  : openPr
+                    ? `Push what's on disk to PR #${openPr.number}`
+                    : `Open a pull request into ${props.base} with what's on disk`
+              }
+            >
+              {openPr ? 'Update PR' : 'Create PR'}
+            </button>
+          </div>
+        </>
       )}
     </header>
   )

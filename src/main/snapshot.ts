@@ -66,6 +66,24 @@ export async function currentTree(repo: string): Promise<string> {
   return writeTreeWithIndex(repo, indexFile)
 }
 
+/**
+ * Runs `fn` with a fresh, throwaway index for `repo` and deletes it afterwards.
+ * Pass the returned env to git so its index operations land there instead of
+ * in `.git/index`.
+ */
+export async function withScratchIndex<T>(
+  repo: string,
+  label: string,
+  fn: (env: NodeJS.ProcessEnv) => Promise<T>
+): Promise<T> {
+  const indexFile = await scratchIndexPath(`${label}-${keyFor(repo)}-${Date.now()}`)
+  try {
+    return await fn({ GIT_INDEX_FILE: indexFile })
+  } finally {
+    await fs.rm(indexFile, { force: true })
+  }
+}
+
 export async function disposeRepoIndexes(repo: string): Promise<void> {
   await fs.rm(await scratchIndexPath(`cur-${keyFor(repo)}`), { force: true }).catch(() => {})
 }

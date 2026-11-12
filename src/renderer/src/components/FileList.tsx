@@ -10,6 +10,10 @@ interface Props {
   onSelect: (path: string) => void
   onToggleReviewed: (path: string) => void
   filterRef: React.RefObject<HTMLInputElement>
+  /** Paths with edits not yet saved. */
+  unsaved: Record<string, unknown>
+  /** Open review comments per path. */
+  commentCounts: Map<string, number>
 }
 
 const STATUS_LABEL: Record<ChangeStatus, string> = {
@@ -34,7 +38,9 @@ export function FileList({
   onFilterChange,
   onSelect,
   onToggleReviewed,
-  filterRef
+  filterRef,
+  unsaved,
+  commentCounts
 }: Props): JSX.Element {
   const visible = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -102,6 +108,13 @@ export function FileList({
                   {dir && <span className="file-dir">{dir}</span>}
                   {name}
                 </span>
+                {f.inCommit && <span className="in-commit" title="Changed in this commit" />}
+                {commentCounts.get(f.path) ? (
+                  <span className="file-comments" title="Open review comments">
+                    {commentCounts.get(f.path)}
+                  </span>
+                ) : null}
+                {f.path in unsaved && <span className="file-unsaved" title="Unsaved edits" />}
                 <span className="counts">
                   {f.binary ? (
                     <span className="count-bin">bin</span>

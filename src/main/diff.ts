@@ -1,6 +1,15 @@
 import path from 'node:path'
-import { EMPTY_TREE, type Baseline, type ChangeStatus, type DiffPayload, type FileDiff } from '@shared/types'
-import { gitLine, looksBinary, readBlob, readWorktreeFile } from './git'
+import type { Baseline, ChangeStatus, DiffPayload, FileDiff } from '@shared/types'
+import {
+  isRegularFile,
+  isUtf8,
+  linesChangedIn,
+  looksBinary,
+  mergeBaseWith,
+  parentOf,
+  readBlob,
+  readWorktreeFile
+} from './git'
 import { currentTree } from './snapshot'
 
 const MAX_DIFF_BYTES = 3 * 1024 * 1024
@@ -22,19 +31,19 @@ interface Sides {
   after: string | 'WORKTREE'
 }
 
-async function sidesFor(repo: string, baseline: Baseline): Promise<Sides> {
+export async function sidesFor(repo: string, baseline: Baseline): Promise<Sides> {
   switch (baseline.kind) {
+    case 'branch':
+      return { before: await mergeBaseWith(repo, baseline.base!), after: 'WORKTREE' }
     case 'worktree':
       return { before: 'HEAD', after: 'WORKTREE' }
-    case 'staged':
-      return { before: 'HEAD', after: 'INDEX' }
     case 'snapshot':
       return { before: baseline.ref!, after: 'WORKTREE' }
     case 'commit': {
-      const parent = await gitLine(repo, ['rev-parse', '--verify', `${baseline.ref}^`], {
-        allowFailure: true
-      })
-      return { before: parent || EMPTY_TREE, after: baseline.ref! }
+      const before = baseline.cumulative
+        ? await mergeBaseWith(repo, baseline.base!)
+        : await parentOf(repo, baseline.ref!)
+      return { before, after: baseline.ref! }
     }
   }
 }
@@ -50,9 +59,10 @@ async function readSide(
 
   const onDisk = await readWorktreeFile(repo, filePath)
   if (onDisk) return onDisk
-  // In snapshot mode the change list comes from a tree pair, so a file can be
-  // listed after the agent has already moved it again. Fall back to the tree.
-  if (baseline.kind === 'snapshot') {
+  // In snapshot and branch modes the change list comes from a tree pair, so a
+  // file can be listed after the agent has already moved it again. Fall back
+  // to the tree.
+  if (baseline.kind === 'snapshot' || baseline.kind === 'branch') {
     return readBlob(repo, await currentTree(repo), filePath)
   }
   return null
@@ -67,7 +77,7 @@ function toDataUrl(buf: Buffer, ext: string): string | null {
 export async function loadFileDiff(
   repo: string,
   baseline: Baseline,
-  file: { path: string; oldPath?: string; status: ChangeStatus; untracked: boolean }
+  file: { path: string; oldPath?: string; status: ChangeStatus; untracked: boolean; inCommit?: boolean }
 ): Promise<FileDiff> {
   const sides = await sidesFor(repo, baseline)
 
@@ -82,15 +92,30 @@ export async function loadFileDiff(
   ])
 
   const ext = path.extname(file.path).toLowerCase()
-  const payload = buildPayload(beforeBuf, afterBuf, ext, beforePath)
-  return { path: file.path, status: file.status, payload }
+  // Editing writes the text straight back to disk, so only offer it when that
+  // round trip is exact: a regular file (a symlink would be written through)
+  // holding valid UTF-8 (anything else would come back as U+FFFD).
+  const editable =
+    afterRev === 'WORKTREE' &&
+    afterBuf !== null &&
+    isUtf8(afterBuf) &&
+    (await isRegularFile(repo, file.path))
+  const payload = buildPayload(beforeBuf, afterBuf, ext, beforePath, editable)
+  const result: FileDiff = { path: file.path, status: file.status, payload }
+
+  // Only files the commit touched have lines of its own to mark.
+  if (baseline.kind === 'commit' && baseline.cumulative && file.inCommit && payload.kind === 'text' && afterRev !== null) {
+    result.commitLines = await linesChangedIn(repo, baseline.ref!, file.path)
+  }
+  return result
 }
 
 function buildPayload(
   before: Buffer | null,
   after: Buffer | null,
   ext: string,
-  originalPath: string
+  originalPath: string,
+  editable: boolean
 ): DiffPayload {
   const bytes = Math.max(before?.length ?? 0, after?.length ?? 0)
 
@@ -116,7 +141,8 @@ function buildPayload(
     kind: 'text',
     original: before?.toString('utf8') ?? '',
     modified: after?.toString('utf8') ?? '',
-    originalPath
+    originalPath,
+    editable
   }
 }
 

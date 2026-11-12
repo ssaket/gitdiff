@@ -1,9 +1,10 @@
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { BrowserWindow, app, nativeImage, net, protocol, shell } from 'electron'
+import { BrowserWindow, app, dialog, nativeImage, net, protocol, shell } from 'electron'
 import { disposeIpc, registerIpc, requestOpenRepo } from './ipc'
 import { requestOpenFlow } from './flows'
 import { firstRepoArg, flowArg } from './cli'
+import { ensureShellPath } from './pr'
 
 const isDev = !app.isPackaged
 const rendererDist = path.join(__dirname, '../renderer')
@@ -57,6 +58,21 @@ function createWindow(): void {
   })
 
   mainWindow.once('ready-to-show', () => mainWindow?.show())
+
+  // The renderer refuses to unload while edits in the diff view are unsaved —
+  // closing the window, quitting, or a reload. Electron then asks us; ask the
+  // user, and preventDefault() here means "unload anyway".
+  mainWindow.webContents.on('will-prevent-unload', (event) => {
+    const response = dialog.showMessageBoxSync(mainWindow!, {
+      type: 'warning',
+      buttons: ['Cancel', 'Discard Edits'],
+      defaultId: 0,
+      cancelId: 0,
+      message: 'You have unsaved edits.',
+      detail: 'Edits made in the diff view are lost unless you save them (⌘S).'
+    })
+    if (response === 1) event.preventDefault()
+  })
   mainWindow.on('closed', () => {
     mainWindow = null
   })
@@ -128,6 +144,8 @@ if (!app.requestSingleInstanceLock()) {
     brandDevApp()
     registerAppProtocol()
     registerIpc(() => mainWindow)
+    // Started now so it's settled by the time the first PR lookup needs gh.
+    void ensureShellPath()
 
     const target = firstRepoArg(process.argv, { cwd: process.cwd(), appPath: app.getAppPath() })
     if (target) void requestOpenRepo(target, null)

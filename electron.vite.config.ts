@@ -9,7 +9,13 @@ export default defineConfig({
       alias: { '@shared': resolve(__dirname, 'src/shared') }
     },
     build: {
-      rollupOptions: { input: { index: resolve(__dirname, 'src/main/index.ts') } }
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/main/index.ts'),
+          // Run by `gitdiff comments` as plain Node (ELECTRON_RUN_AS_NODE).
+          'comments-cli': resolve(__dirname, 'src/main/comments-cli.ts')
+        }
+      }
     }
   },
   preload: {

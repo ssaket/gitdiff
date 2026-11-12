@@ -20,6 +20,8 @@ gitdiff — review what your coding agent changed
 Usage:
   gitdiff [path]     Open a repository (defaults to the current directory)
   gitdiff flow [...] Render a mermaid diagram (see `gitdiff flow --help`)
+  gitdiff comments   Print the review comments left in GitDiff, for your agent
+                     (see `gitdiff comments --help`)
   gitdiff --help     Show this message
   gitdiff --version  Show the version
 
@@ -53,7 +55,11 @@ target=""
 flow_title=""
 flow_src=""
 
-if [ "$1" = "flow" ]; then
+if [ "$1" = "comments" ]; then
+  # Everything after the word is the CLI's own business; it's handed over as-is.
+  mode="comments"
+  shift
+elif [ "$1" = "flow" ]; then
   mode="flow"
   shift
   while [ $# -gt 0 ]; do
@@ -79,7 +85,9 @@ else
   done
 fi
 
-if [ "$mode" = "flow" ]; then
+if [ "$mode" = "comments" ]; then
+  :
+elif [ "$mode" = "flow" ]; then
   if [ -n "$flow_src" ]; then
     [ -f "$flow_src" ] || { echo "gitdiff flow: no such file: $flow_src" >&2; exit 1; }
     # A real file is handed over as itself, so the app can show where the
@@ -129,6 +137,48 @@ while [ -L "$self" ]; do
   esac
 done
 here=$(cd "$(dirname "$self")" && pwd)
+
+# `gitdiff comments` prints rather than opening a window: the agent reads its
+# output. So it runs in the foreground, as plain Node inside the app's own
+# Electron (ELECTRON_RUN_AS_NODE) — no separate Node install needed. The
+# script ships unpacked from the asar archive so this works on any Electron.
+if [ "$mode" = "comments" ]; then
+  cwd=$(pwd)
+  # As a Claude Code hook this runs on every prompt, everywhere. In a repo that
+  # has never had a review comment — or no repo at all — say nothing without
+  # starting Electron.
+  case " $* " in
+    *" --hook "*)
+      gitdir=$(git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null) || exit 0
+      [ -f "$gitdir/gitdiff/review.json" ] || exit 0
+      ;;
+  esac
+  if [ -x "$here/../../MacOS/GitDiff" ] && [ -f "$here/../app.asar.unpacked/out/main/comments-cli.js" ]; then
+    exe="$here/../../MacOS/GitDiff"
+    script="$here/../app.asar.unpacked/out/main/comments-cli.js"
+  else
+    exe=""
+    for candidate in "$GITDIFF_APP" "/Applications/GitDiff.app" "$HOME/Applications/GitDiff.app"; do
+      [ -n "$candidate" ] || continue
+      if [ -x "$candidate/Contents/MacOS/GitDiff" ] &&
+        [ -f "$candidate/Contents/Resources/app.asar.unpacked/out/main/comments-cli.js" ]; then
+        exe="$candidate/Contents/MacOS/GitDiff"
+        script="$candidate/Contents/Resources/app.asar.unpacked/out/main/comments-cli.js"
+        break
+      fi
+    done
+    if [ -z "$exe" ]; then
+      project=$(cd "$here/.." && pwd)
+      exe="$project/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+      script="$project/out/main/comments-cli.js"
+    fi
+  fi
+  if [ ! -x "$exe" ] || [ ! -f "$script" ]; then
+    echo "gitdiff comments: could not find GitDiff — install the app, or run 'npm run build' in the checkout" >&2
+    exit 1
+  fi
+  ELECTRON_RUN_AS_NODE=1 exec "$exe" "$script" "$cwd" "$@"
+fi
 
 # The arguments the app itself gets, built once so every launch path below
 # hands over the same thing. Positional parameters because this is POSIX sh and

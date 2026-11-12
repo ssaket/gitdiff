@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   Baseline,
+  BranchInfo,
   ChangeSet,
   CommitInfo,
   FileChange,
@@ -8,8 +9,12 @@ import type {
   FlowDoc,
   OpenFlowRequest,
   OpenRepoRequest,
+  PrLookup,
+  PublishRequest,
+  PublishResult,
   RepoInfo
 } from '@shared/types'
+import type { LocatedComment, ReviewState } from '@shared/review'
 
 const api = {
   pickRepo: (): Promise<RepoInfo | null> => ipcRenderer.invoke('repo:pick'),
@@ -26,11 +31,29 @@ const api = {
   markSnapshot: (root: string): Promise<string> => ipcRenderer.invoke('snapshot:mark', root),
   listCommits: (root: string): Promise<CommitInfo[]> => ipcRenderer.invoke('commits:list', root),
 
-  stageFile: (root: string, path: string): Promise<void> => ipcRenderer.invoke('file:stage', { root, path }),
-  unstageFile: (root: string, path: string): Promise<void> =>
-    ipcRenderer.invoke('file:unstage', { root, path }),
-  revertFile: (root: string, path: string, untracked: boolean): Promise<boolean> =>
-    ipcRenderer.invoke('file:revert', { root, path, untracked }),
+  /** `where` finishes the confirmation's sentence: "It goes back to how it was <where>." */
+  discardFile: (root: string, baseline: Baseline, file: FileChange, where: string): Promise<boolean> =>
+    ipcRenderer.invoke('file:discard', { root, baseline, file, where }),
+
+  /** Saves an edit from the diff view. Resolves false if the user declined to overwrite a newer copy. */
+  writeFile: (root: string, path: string, text: string, expected: string): Promise<boolean> =>
+    ipcRenderer.invoke('file:write', { root, path, text, expected }),
+
+  loadReview: (root: string): Promise<ReviewState> => ipcRenderer.invoke('review:load', root),
+  saveReview: (root: string, state: ReviewState): Promise<void> =>
+    ipcRenderer.invoke('review:save', { root, state }),
+  /** Open comments with where their lines are in the files on disk now. */
+  locatedComments: (root: string): Promise<LocatedComment[]> => ipcRenderer.invoke('review:located', root),
+  /** The open comments as a prompt for the agent — what `gitdiff comments` prints, plus a line of instruction. */
+  reviewPrompt: (root: string): Promise<string> => ipcRenderer.invoke('review:prompt', root),
+  copyText: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:writeText', text),
+
+  branchInfo: (root: string, base?: string): Promise<BranchInfo> =>
+    ipcRenderer.invoke('branch:info', { root, base }),
+  /** Asks GitHub, so it's a network round trip — not for every refresh. */
+  lookupPr: (root: string): Promise<PrLookup> => ipcRenderer.invoke('pr:lookup', root),
+  prExcludes: (root: string): Promise<string[]> => ipcRenderer.invoke('pr:excludes', root),
+  publishPr: (request: PublishRequest): Promise<PublishResult> => ipcRenderer.invoke('pr:publish', request),
   revealFile: (root: string, path: string): Promise<void> => ipcRenderer.invoke('file:reveal', { root, path }),
   openFile: (root: string, path: string): Promise<void> =>
     ipcRenderer.invoke('file:openExternal', { root, path }),

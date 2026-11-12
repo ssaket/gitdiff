@@ -3,29 +3,38 @@ import { promises as fs } from 'node:fs'
 import { BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from 'electron'
 import type {
   Baseline,
+  BranchInfo,
   ChangeSet,
   FileChange,
   FileDiff,
   FlowDoc,
   OpenFlowRequest,
   OpenRepoRequest,
+  PrLookup,
+  PublishRequest,
+  PublishResult,
   RepoInfo
 } from '@shared/types'
 import {
-  checkoutFile,
   diffRevArgs,
+  existsAt,
+  forgetFromIndex,
+  isUtf8,
   listChanges,
   listUntracked,
+  pathsChangedIn,
   recentCommits,
   resolveRepo,
-  stageFile,
-  unstageFile
+  restoreFromRev
 } from './git'
 import { currentTree, disposeRepoIndexes, markSnapshot } from './snapshot'
-import { loadFileDiff } from './diff'
+import { loadFileDiff, sidesFor } from './diff'
 import { RepoWatcher } from './watcher'
 import { consumePendingFlows, createFlow, updateFlow } from './flows'
-import { forgetRepo, listFlows, listRecentRepos, rememberRepo, removeFlow } from './store'
+import { branchInfo, lookupPr, publish } from './pr'
+import { loadReview, locateOpen, reviewPrompt, saveReview } from './review'
+import type { LocatedComment, ReviewState } from '@shared/review'
+import { forgetRepo, getPrExcludes, listFlows, listRecentRepos, rememberRepo, removeFlow } from './store'
 
 /**
  * The renderer names repos by absolute path, so the main process only honours
@@ -53,6 +62,26 @@ function safeJoin(root: string, relPath: string): string {
     throw new Error(`Path escapes repository: ${relPath}`)
   }
   return full
+}
+
+/**
+ * safeJoin only checks the path as written; a symlinked directory inside the
+ * repo can still lead out of it. Before writing, resolve the real location of
+ * the nearest directory that exists and check that's inside the real repo.
+ */
+async function assertWritableInside(root: string, full: string, relPath: string): Promise<void> {
+  const realRoot = await fs.realpath(root)
+  let dir = path.dirname(full)
+  let real: string | null = null
+  while (!(real = await fs.realpath(dir).catch(() => null))) {
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  const rel = real === null ? '..' : path.relative(realRoot, real)
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`${relPath} is outside the repository (through a symlink), so it can't be saved from here.`)
+  }
 }
 
 let watcher: RepoWatcher | null = null
@@ -123,12 +152,17 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
       // Nothing is committed yet, so everything on disk is new.
       files = await listUntracked(root)
     } else {
-      const cur = baseline.kind === 'snapshot' ? await currentTree(root) : undefined
+      const fromTrees = baseline.kind === 'snapshot' || baseline.kind === 'branch'
+      const cur = fromTrees ? await currentTree(root) : undefined
       const revArgs = await diffRevArgs(root, baseline, cur)
       files = await listChanges(root, revArgs)
       // `git diff` only reports paths git already knows about; in worktree mode
       // the agent's brand-new files are exactly the ones you most want to see.
       if (baseline.kind === 'worktree') files = files.concat(await listUntracked(root))
+      if (baseline.kind === 'commit' && baseline.cumulative) {
+        const touched = await pathsChangedIn(root, baseline.ref!)
+        files = files.map((f) => (touched.has(f.path) ? { ...f, inCommit: true } : f))
+      }
     }
 
     files.sort((a, b) => a.path.localeCompare(b.path))
@@ -154,45 +188,149 @@ export function registerIpc(getWindow: () => BrowserWindow | null): void {
     return recentCommits(root)
   })
 
-  handle<{ root: string; path: string }, void>('file:stage', async ({ root, path: p }) => {
+  handle<{ root: string; base?: string }, BranchInfo>('branch:info', async ({ root, base }) => {
     assertAuthorized(root)
-    safeJoin(root, p)
-    await stageFile(root, p)
+    return branchInfo(root, await resolveRepo(root), base)
   })
 
-  handle<{ root: string; path: string }, void>('file:unstage', async ({ root, path: p }) => {
+  handle<string, PrLookup>('pr:lookup', async (root) => {
     assertAuthorized(root)
-    safeJoin(root, p)
-    await unstageFile(root, p)
+    return lookupPr(root, (await resolveRepo(root)).branch)
   })
 
-  handle<{ root: string; path: string; untracked: boolean }, boolean>(
-    'file:revert',
-    async ({ root, path: p, untracked }) => {
+  handle<string, string[]>('pr:excludes', async (root) => {
+    assertAuthorized(root)
+    return getPrExcludes(root)
+  })
+
+  handle<PublishRequest, PublishResult>('pr:publish', async (req) => {
+    assertAuthorized(req.root)
+    for (const p of req.exclude) safeJoin(req.root, p)
+    return publish(req, await resolveRepo(req.root))
+  })
+
+  /**
+   * Throws away what the current view shows for one file — which depends on the
+   * view. "Uncommitted" puts it back to HEAD; the whole-PR view puts it back to
+   * the base branch, so it drops out of the PR even if the agent committed it;
+   * "since round" puts it back to the round's start.
+   */
+  handle<{ root: string; baseline: Baseline; file: FileChange; where: string }, boolean>(
+    'file:discard',
+    async ({ root, baseline, file, where }) => {
       assertAuthorized(root)
-      const full = safeJoin(root, p)
-      const win = getWindow()
+      if (baseline.kind === 'commit') throw new Error("A commit's changes can't be discarded from here.")
+      const full = safeJoin(root, file.path)
+      if (file.oldPath) safeJoin(root, file.oldPath)
 
-      const { response } = await dialog.showMessageBox(win!, {
+      const { before } = await sidesFor(root, baseline)
+      // A rename's old side is a different path; a copy's source is still there
+      // and untouched, so only the copy itself goes.
+      const beforePath = file.status === 'R' && file.oldPath ? file.oldPath : file.path
+      const hadIt = !file.untracked && before !== null && (await existsAt(root, before, beforePath))
+      const onDisk = !!(await fs.lstat(full).catch(() => null))
+      const trashes = onDisk && (!hadIt || beforePath !== file.path)
+      const isHead = before === 'HEAD'
+      // Gone from disk and not in the base either: against HEAD that can only
+      // be a staged add the agent has since deleted, and unstaging is all
+      // that's left to do. Anywhere else, there's nothing to throw away.
+      const unstageOnly = !hadIt && !onDisk
+      if (unstageOnly && !isHead) return false
+
+      const { response } = await dialog.showMessageBox(getWindow()!, {
         type: 'warning',
-        buttons: ['Cancel', untracked ? 'Move to Trash' : 'Discard Changes'],
+        buttons: ['Cancel', hadIt ? 'Discard Changes' : unstageOnly ? 'Unstage' : 'Move to Trash'],
         defaultId: 0,
         cancelId: 0,
-        message: untracked ? `Move ${p} to the Trash?` : `Discard all changes to ${p}?`,
-        detail: untracked
-          ? 'The file is untracked, so git has no copy of it. It will go to the Trash.'
-          : 'The file will be restored to its committed state. This cannot be undone.'
+        message: hadIt
+          ? `Discard the changes to ${file.path}?`
+          : unstageOnly
+            ? `Unstage ${file.path}?`
+            : `Move ${file.path} to the Trash?`,
+        detail: hadIt
+          ? `It goes back to how it was ${where}.` +
+            (trashes ? ` ${file.path} goes to the Trash and ${beforePath} comes back.` : '') +
+            ' This cannot be undone.'
+          : unstageOnly
+            ? "It's staged as a new file but no longer on disk; this takes it out of the index."
+            : `It didn't exist ${where}, so it goes to the Trash` +
+              (file.untracked ? ' — git has no copy of it.' : '.')
       })
       if (response !== 1) return false
 
-      if (untracked) {
-        await shell.trashItem(full)
-      } else {
-        await checkoutFile(root, p)
-      }
+      if (hadIt) await restoreFromRev(root, before!, beforePath, isHead)
+      if (trashes) await shell.trashItem(full)
+      // Against HEAD a staged add would otherwise survive in the index with
+      // nothing on disk behind it.
+      if (isHead && (trashes || unstageOnly)) await forgetFromIndex(root, file.path)
       return true
     }
   )
+
+  /**
+   * Saves an edit made in the diff view. `expected` is what the file held when
+   * editing began; if the agent has written it since, ask before overwriting
+   * rather than silently dropping its change.
+   */
+  handle<{ root: string; path: string; text: string; expected: string }, boolean>(
+    'file:write',
+    async ({ root, path: p, text, expected }) => {
+      assertAuthorized(root)
+      const full = safeJoin(root, p)
+      await assertWritableInside(root, full, p)
+      // The diff view only offers editing for regular UTF-8 files; refuse the
+      // rest here too, since writing through a symlink, or re-encoding Latin-1
+      // as UTF-8, would damage something.
+      const stat = await fs.lstat(full).catch(() => null)
+      if (stat?.isSymbolicLink()) throw new Error(`${p} is a symlink; edit the file it points to instead.`)
+      if (stat && !stat.isFile()) throw new Error(`${p} isn't a regular file.`)
+      const bytes = stat ? await fs.readFile(full) : null
+      if (bytes && !isUtf8(bytes)) {
+        throw new Error(`${p} isn't UTF-8 text, so saving it from here would mangle it. Edit it in your editor.`)
+      }
+      const current = bytes?.toString('utf8') ?? null
+      if (current !== null && current !== expected) {
+        const { response } = await dialog.showMessageBox(getWindow()!, {
+          type: 'warning',
+          buttons: ['Cancel', 'Overwrite'],
+          defaultId: 0,
+          cancelId: 0,
+          message: `${p} changed on disk while you were editing it.`,
+          detail: 'Saving replaces what is on disk now — probably the agent\'s latest change — with your version.'
+        })
+        if (response !== 1) return false
+      }
+      await fs.mkdir(path.dirname(full), { recursive: true })
+      await fs.writeFile(full, text, 'utf8')
+      return true
+    }
+  )
+
+  // ---------------------------------------------------------------- review
+
+  handle<string, ReviewState>('review:load', async (root) => {
+    assertAuthorized(root)
+    return loadReview(root)
+  })
+
+  handle<{ root: string; state: ReviewState }, void>('review:save', async ({ root, state }) => {
+    assertAuthorized(root)
+    await saveReview(root, state)
+  })
+
+  handle<string, LocatedComment[]>('review:located', async (root) => {
+    assertAuthorized(root)
+    return locateOpen(root, await loadReview(root))
+  })
+
+  handle<string, string>('review:prompt', async (root) => {
+    assertAuthorized(root)
+    return reviewPrompt(root, { intro: true })
+  })
+
+  handle<string, void>('clipboard:writeText', async (text) => {
+    clipboard.writeText(text)
+  })
 
   handle<{ root: string; path: string }, void>('file:reveal', async ({ root, path: p }) => {
     assertAuthorized(root)
